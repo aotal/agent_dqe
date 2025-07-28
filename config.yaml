@@ -1,0 +1,10 @@
+calling_aet: DUMMY_CALLER
+current_node: dummy
+dicomweb_timeout: 30.0
+dicomweb_url: http://localhost:8042
+nodes:
+  dummy:
+    ae_title: DUMMY_NODE
+    description: Nodo de prueba
+    host: 127.0.0.1
+    port: 11112

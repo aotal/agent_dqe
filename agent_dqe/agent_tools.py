@@ -1,41 +1,79 @@
-# agent_tools.py
+# agent_dqe/agent_tools.py (Versión Jerárquica Correcta)
 
-from .mcp_wrapper import MCP_Client_Wrapper
+import os
+import json
+from typing import Any, Dict, List, Optional
+from fastmcp import Client
+from fastmcp.client.transports import SSETransport
 
-def tool_listar_nodos_configurados() -> dict:
-    """
-    Usa esta herramienta para obtener una lista de todos los nodos DICOM configurados
-    en el servidor y para saber cuál es el nodo activo actualmente.
-    Es útil para ver las opciones de conexión disponibles.
-    """
-    wrapper = MCP_Client_Wrapper()
-    return wrapper.list_configured_nodes()
+class MCPServerTools:
+    def __init__(self, server_url: str):
+        if not server_url:
+            raise ValueError("La URL del servidor MCP no puede estar vacía.")
+        self.transport = SSETransport(url=server_url)
+        self.client = Client(self.transport)
 
-def tool_buscar_estudios_pacs(patient_name: str = "", study_description: str = "") -> dict:
-    """
-    Usa esta herramienta para buscar estudios de pacientes en el PACS.
-    Puedes filtrar por nombre de paciente o por descripción del estudio.
-    Devuelve una lista de estudios encontrados con sus detalles.
-    """
-    wrapper = MCP_Client_Wrapper()
-    params = {"PatientName": patient_name, "StudyDescription": study_description}
-    # Filtra los parámetros que no están vacíos
-    active_params = {k: v for k, v in params.items() if v}
-    return wrapper.qido_query(query_level="studies", query_params=active_params)
+    async def _call_qido_tool(self, query_level: str, filters: Dict) -> Dict:
+        """Función auxiliar interna para llamar a la herramienta qido_web_query."""
+        tool_name = "qido_web_query"
+        params = {"query_level": query_level, "filters": filters}
+        print(f"ADK Tool: Llamando a la herramienta remota '{tool_name}' con params: {params}")
+        try:
+            async with self.client as c:
+                response = await c.call_tool(tool_name, params)
+                if response.is_error:
+                    error_content = response.content[0].text if response.content else "Error desconocido"
+                    raise ConnectionError(error_content)
+                return {"status": "success", "data": response.data}
+        except Exception as e:
+            return {"status": "error", "message": f"Fallo al llamar a la herramienta '{tool_name}': {e}"}
 
-def tool_analizar_mtf_serie(study_uid: str, series_uid: str) -> dict:
-    """
-    Usa esta herramienta para ejecutar un análisis completo de la MTF (Función de Transferencia de Modulación)
-    para todas las imágenes de una serie específica.
-    Necesitas proporcionar el Study UID y el Series UID.
-    """
-    wrapper = MCP_Client_Wrapper()
-    params = {"study_instance_uid": study_uid, "series_instance_uid": series_uid}
-    try:
-        loop = asyncio.get_event_loop()
-        results = loop.run_until_complete(
-            wrapper._call_tool_async("analyze_mtf_for_series", params)
-        )
-        return {"status": "success", "data": results.dict()}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    async def list_dicom_nodes(self) -> Dict[str, Any]:
+        """Obtiene la lista de nodos DICOM del servidor."""
+        print("ADK Tool: Leyendo el recurso 'resource://dicom_nodes'...")
+        try:
+            async with self.client as c:
+                content_parts = await c.read_resource("resource://dicom_nodes")
+                if not content_parts or not hasattr(content_parts[0], 'text'):
+                    raise ConnectionError("La respuesta del recurso estaba vacía o mal formada.")
+                response_data = json.loads(content_parts[0].text)
+                return {"status": "success", "data": response_data}
+        except Exception as e:
+            return {"status": "error", "message": f"Fallo al leer el recurso 'dicom_nodes': {e}"}
+
+    async def query_patients(self, name_pattern: Optional[str] = None, patient_id: Optional[str] = None) -> Dict[str, Any]:
+        """Busca pacientes en el nodo DICOM activo."""
+        tool_name = "query_patients"
+        params = {k: v for k, v in {"name_pattern": name_pattern, "patient_id": patient_id}.items() if v is not None}
+        print(f"ADK Tool: Llamando a la herramienta remota '{tool_name}' con params: {params}")
+        try:
+            async with self.client as c:
+                response = await c.call_tool(tool_name, params)
+                if response.is_error:
+                    error_content = response.content[0].text if response.content else "Error desconocido"
+                    raise ConnectionError(error_content)
+                return {"status": "success", "data": response.data}
+        except Exception as e:
+            return {"status": "error", "message": f"Fallo al llamar a la herramienta '{tool_name}': {e}"}
+
+    # --- NUEVAS HERRAMIENTAS EXPLÍCITAS Y CORRECTAS ---
+    async def query_studies(self, PatientID: Optional[str] = None, **kwargs: Any) -> Dict:
+        """Busca estudios. Si se provee PatientID, filtra por ese paciente."""
+        filters = kwargs
+        if PatientID:
+            filters['PatientID'] = PatientID
+        return await self._call_qido_tool(query_level="studies", filters=filters)
+
+    async def query_series(self, StudyInstanceUID: str, **kwargs: Any) -> Dict:
+        """Busca todas las series de un estudio específico."""
+        query_level = f"studies/{StudyInstanceUID}/series"
+        return await self._call_qido_tool(query_level=query_level, filters=kwargs)
+
+    async def query_instances(self, StudyInstanceUID: str, SeriesInstanceUID: str, **kwargs: Any) -> Dict:
+        """Busca todas las instancias de una serie específica."""
+        query_level = f"studies/{StudyInstanceUID}/series/{SeriesInstanceUID}/instances"
+        return await self._call_qido_tool(query_level=query_level, filters=kwargs)
+
+# --- Instancia única para ser importada por el agente ---
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/sse/")
+mcp_tools = MCPServerTools(server_url=MCP_SERVER_URL)
